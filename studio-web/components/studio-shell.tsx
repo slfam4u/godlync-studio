@@ -55,8 +55,9 @@ export function StudioShell({ children }: { children: ReactNode }) {
 
       supabase
         .from("creator_profiles")
-        .select("id,display_name,user_id")
-        .or(`user_id.eq.${user.id},uploaded_by.eq.${user.id}`)
+        .select("id,display_name,user_id,status")
+        .eq("user_id", user.id)
+        .eq("status", "approved")
         .limit(1)
         .maybeSingle()
         .then(({ data, error }) => {
@@ -64,6 +65,7 @@ export function StudioShell({ children }: { children: ReactNode }) {
             setIsCreator(true);
             setCreatorName(data.display_name || "GodLync Creator");
           } else {
+            if (error) console.error("Creator profile lookup failed:", error);
             setIsCreator(false);
           }
           setCreatorChecked(true);

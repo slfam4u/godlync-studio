@@ -180,7 +180,8 @@ export async function uploadStudioMedia(file: File, title: string, contentType =
     const { data: creatorProfile } = await supabase
       .from("creator_profiles")
       .select("id")
-      .or(`user_id.eq.${user.id},uploaded_by.eq.${user.id}`)
+      .eq("user_id", user.id)
+      .eq("status", "approved")
       .limit(1)
       .maybeSingle();
 
