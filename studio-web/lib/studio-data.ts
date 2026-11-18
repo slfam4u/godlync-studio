@@ -149,6 +149,49 @@ export async function getStudioOverview() {
       playPage += 1;
     }
 
+    const eventStart = new Date();
+    eventStart.setHours(0, 0, 0, 0);
+    eventStart.setDate(eventStart.getDate() - 6);
+
+    const { data: creatorMediaRows } = await supabase
+      .from("media_files")
+      .select("id")
+      .or(profileFilter)
+      .or("is_deleted.is.null,is_deleted.eq.false")
+      .range(0, 9999);
+
+    const creatorMediaIds = new Set(
+      (creatorMediaRows ?? []).map((item) => item.id)
+    );
+
+    const { data: playEvents } = await supabase
+      .from("app_events")
+      .select("payload,created_at")
+      .eq("event_type", "media_play")
+      .gte("created_at", eventStart.toISOString())
+      .order("created_at", { ascending: true })
+      .range(0, 9999);
+
+    const chartData = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(eventStart);
+      date.setDate(eventStart.getDate() + index);
+
+      return {
+        name: date.toLocaleDateString("en-US", { weekday: "short" }),
+        key: date.toISOString().slice(0, 10),
+        plays: 0,
+      };
+    });
+
+    for (const event of playEvents ?? []) {
+      const payload = event.payload as { media_id?: string } | null;
+      if (!payload?.media_id || !creatorMediaIds.has(payload.media_id)) continue;
+
+      const key = new Date(event.created_at).toISOString().slice(0, 10);
+      const day = chartData.find((item) => item.key === key);
+      if (day) day.plays += 1;
+    }
+
     const mappedRows = (mediaRows.data ?? []).map((item: any) => {
       const status = item.is_published
         ? "Published"
@@ -176,6 +219,7 @@ export async function getStudioOverview() {
         return stat;
       }),
       contentRows: mappedRows.length ? mappedRows : demoOverview.contentRows,
+      chartData,
     };
   } catch {
     return demoOverview;
