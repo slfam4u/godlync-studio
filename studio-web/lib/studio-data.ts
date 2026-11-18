@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { createStudioBrowserClient } from "@/lib/supabase-browser";
 
 const demoOverview = {
   stats: [
@@ -49,6 +50,10 @@ const demoPublishing = [
 ];
 
 function getSupabaseClient() {
+  if (typeof window !== "undefined") {
+    return createStudioBrowserClient();
+  }
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
@@ -56,37 +61,120 @@ function getSupabaseClient() {
 
   return createClient(url, key, {
     auth: {
-      persistSession: typeof window !== "undefined",
-      autoRefreshToken: typeof window !== "undefined",
-      detectSessionInUrl: typeof window !== "undefined",
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
     },
   });
+}
+
+function formatMetric(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`.replace(".0M", "M");
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`.replace(".0K", "K");
+  return String(value);
 }
 
 export async function getStudioOverview() {
   const supabase = getSupabaseClient();
 
-  if (!supabase) {
-    return demoOverview;
-  }
+  if (!supabase) return demoOverview;
 
   try {
-    const { data, error } = await supabase.from("media_files").select("*").limit(4);
+    const { data: sessionData } = await supabase.auth.getSession();
+    const user = sessionData.session?.user;
 
-    if (error || !data) {
-      return demoOverview;
+    if (!user) return demoOverview;
+
+    const { data: profiles, error: profileError } = await supabase
+      .from("creator_profiles")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("status", "approved");
+
+    if (profileError) return demoOverview;
+
+    const profileIds = (profiles ?? []).map((profile) => profile.id);
+
+    if (!profileIds.length) {
+      return {
+        ...demoOverview,
+        stats: demoOverview.stats.map((stat, index) =>
+          index < 3 ? { ...stat, value: "0", change: "Live" } : stat
+        ),
+      };
     }
 
-    const mappedRows = data.map((item: any) => ({
-      title: item.title ?? item.name ?? "Untitled media",
-      type: item.type ?? item.media_type ?? "Sermon",
-      status: item.status ?? "Published",
-      plays: item.play_count ? `${item.play_count}` : "0",
-      updated: item.updated_at ? new Date(item.updated_at).toLocaleDateString() : "Recently",
-    }));
+    const profileFilter = `creator_profile_id.in.(${profileIds.join(",")})`;
+
+    const [mediaCount, mediaRows, followerCount] = await Promise.all([
+      supabase
+        .from("media_files")
+        .select("id", { count: "exact", head: true })
+        .or(profileFilter)
+        .or("is_deleted.is.null,is_deleted.eq.false"),
+      supabase
+        .from("media_files")
+        .select("id,title,name,content_type,play_count,processed_status,is_published,updated_at,created_at")
+        .or(profileFilter)
+        .or("is_deleted.is.null,is_deleted.eq.false")
+        .order("created_at", { ascending: false })
+        .limit(4),
+      supabase
+        .from("followers")
+        .select("id", { count: "exact", head: true })
+        .in("creator_id", profileIds),
+    ]);
+
+    let totalPlays = 0;
+    let playPage = 0;
+    const playPageSize = 1000;
+
+    while (true) {
+      const playRows = await supabase
+        .from("media_files")
+        .select("play_count")
+        .or(profileFilter)
+        .or("is_deleted.is.null,is_deleted.eq.false")
+        .range(playPage * playPageSize, (playPage + 1) * playPageSize - 1);
+
+      if (playRows.error) break;
+
+      const rows = playRows.data ?? [];
+      totalPlays += rows.reduce(
+        (sum, item) => sum + (Number(item.play_count) || 0),
+        0
+      );
+
+      if (rows.length < playPageSize) break;
+      playPage += 1;
+    }
+
+    const mappedRows = (mediaRows.data ?? []).map((item: any) => {
+      const status = item.is_published
+        ? "Published"
+        : item.processed_status
+          ? String(item.processed_status).toUpperCase()
+          : "Draft";
+
+      return {
+        title: item.title ?? item.name ?? "Untitled media",
+        type: item.content_type ?? "Sermon",
+        status,
+        plays: formatMetric(Number(item.play_count) || 0),
+        updated: item.updated_at
+          ? new Date(item.updated_at).toLocaleDateString()
+          : "Recently",
+      };
+    });
 
     return {
       ...demoOverview,
+      stats: demoOverview.stats.map((stat, index) => {
+        if (index === 0) return { ...stat, value: formatMetric(mediaCount.count ?? 0), change: "Live" };
+        if (index === 1) return { ...stat, value: (totalPlays ?? 0).toLocaleString("en-US"), change: "Live" };
+        if (index === 2) return { ...stat, value: formatMetric(followerCount.count ?? 0), change: "Live" };
+        return stat;
+      }),
       contentRows: mappedRows.length ? mappedRows : demoOverview.contentRows,
     };
   } catch {
@@ -254,4 +342,63 @@ export async function publishMediaToGodLync(mediaId: string) {
   });
 
   return { ok: true };
+}
+
+export async function getAudienceInsights() {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const user = sessionData.session?.user;
+  if (!user) return null;
+
+  const { data: profiles, error: profileError } = await supabase
+    .from("creator_profiles")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("status", "approved");
+
+  if (profileError) return null;
+
+  const profileIds = (profiles ?? []).map((profile) => profile.id);
+  if (!profileIds.length) {
+    return [
+      { name: "Followers", value: "0" },
+      { name: "Favorites", value: "0" },
+      { name: "Media likes", value: "0" },
+      { name: "Comments", value: "0" },
+    ];
+  }
+
+  const { data: mediaRows } = await supabase
+    .from("media_files")
+    .select("id")
+    .in("creator_profile_id", profileIds)
+    .or("is_deleted.is.null,is_deleted.eq.false");
+
+  const mediaIds = (mediaRows ?? []).map((row) => row.id).filter(Boolean);
+
+  const [followers, favorites, mediaLikes, comments] = await Promise.all([
+    supabase
+      .from("followers")
+      .select("id", { count: "exact", head: true })
+      .in("creator_id", profileIds),
+    mediaIds.length
+      ? supabase.from("favorites").select("id", { count: "exact", head: true }).in("file_id", mediaIds)
+      : Promise.resolve({ count: 0 }),
+    mediaIds.length
+      ? supabase.from("likes").select("id", { count: "exact", head: true }).in("file_id", mediaIds)
+      : Promise.resolve({ count: 0 }),
+    supabase
+      .from("wall_comments")
+      .select("id", { count: "exact", head: true })
+      .in("creator_profile_id", profileIds),
+  ]);
+
+  return [
+    { name: "Followers", value: (followers.count ?? 0).toLocaleString("en-US") },
+    { name: "Favorites", value: (favorites.count ?? 0).toLocaleString("en-US") },
+    { name: "Media likes", value: (mediaLikes.count ?? 0).toLocaleString("en-US") },
+    { name: "Comments", value: (comments.count ?? 0).toLocaleString("en-US") },
+  ];
 }

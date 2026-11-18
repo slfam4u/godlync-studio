@@ -1,14 +1,26 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { Users } from "lucide-react";
 import { StudioShell } from "@/components/studio-shell";
+import { getAudienceInsights } from "@/lib/studio-data";
 
-const audience = [
-  { name: "New followers", value: "1,245" },
-  { name: "Returning listeners", value: "8,430" },
-  { name: "Email subscribers", value: "2,940" },
-  { name: "Prayer supporters", value: "1,612" },
+const demoAudience = [
+  { name: "Followers", value: "0" },
+  { name: "Favorites", value: "0" },
+  { name: "Media likes", value: "0" },
+  { name: "Comments", value: "0" },
 ];
 
 export default function AudiencePage() {
+  const [audience, setAudience] = useState(demoAudience);
+
+  useEffect(() => {
+    getAudienceInsights()
+      .then((value) => setAudience(value ?? demoAudience))
+      .catch(() => setAudience(demoAudience));
+  }, []);
+
   return (
     <StudioShell>
       <div className="mt-6 rounded-3xl border border-white/10 bg-[#10141d] p-5 shadow-xl shadow-black/20">
