@@ -342,12 +342,14 @@ export async function uploadStudioMedia(file: File, title: string, contentType =
 
     if (mediaError) throw mediaError;
 
-    await supabase.from("media_processing_jobs").insert({
-      media_file_id: mediaData.id,
-      job_type: "transcription",
-      status: "queued",
-      requested_by: user.id,
-    });
+    if (!file.type.startsWith("video/")) {
+      await supabase.from("media_processing_jobs").insert({
+        media_file_id: mediaData.id,
+        job_type: "transcription",
+        status: "queued",
+        requested_by: user.id,
+      });
+    }
 
     return {
       ok: true,
@@ -561,4 +563,125 @@ export async function getAnalyticsEngagement() {
   }
 
   return { data: chartData, totals };
+}
+
+export async function createSermonVideoJob(mediaId: string, inputPath: string, title: string, language: "english" | "telugu") {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true, demo: true, mediaId };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (!sessionData.session) return { ok: false, error: "Please sign in." };
+
+  const idempotencyKey = `sermon-video:${mediaId}:${language}`;
+  const { data, error } = await supabase
+    .from("media_processing_jobs")
+    .upsert({
+      media_file_id: mediaId,
+      requested_by: sessionData.session.user.id,
+      job_type: "sermon_video",
+      status: "queued",
+      progress: 0,
+      input_path: inputPath,
+      idempotency_key: idempotencyKey,
+      attempts: 0,
+      result_payload: { title, language },
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "idempotency_key" })
+    .select("id,status,progress,attempts")
+    .single();
+
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, job: data };
+}
+
+export async function getSermonVideoJob(mediaId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("media_processing_jobs")
+    .select("id,job_type,status,progress,error,result_payload,started_at,completed_at,updated_at")
+    .eq("media_file_id", mediaId)
+    .eq("job_type", "sermon_video")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return null;
+  return data;
+}
+
+export async function getMediaProcessingAssets(mediaId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return [];
+
+  const { data, error } = await supabase
+    .from("media_assets")
+    .select("id,asset_type,label,title,description,public_url,storage_path,start_seconds,duration_seconds,status,is_published,created_at")
+    .eq("media_file_id", mediaId)
+    .order("created_at", { ascending: true });
+
+  if (error) return [];
+  return data ?? [];
+}
+
+export async function getMediaTranscript(mediaId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data, error } = await supabase
+    .from("media_transcripts")
+    .select("id,language,transcript_json,transcript_text,status,created_at")
+    .eq("media_file_id", mediaId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return null;
+  return data;
+}
+
+export async function approveMediaAsset(assetId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true, demo: true };
+
+  const { error } = await supabase
+    .from("media_assets")
+    .update({ status: "approved", updated_at: new Date().toISOString() })
+    .eq("id", assetId);
+
+  return error ? { ok: false, error: error.message } : { ok: true };
+}
+
+export async function publishMediaAsset(assetId: string) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return { ok: true, demo: true };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (!sessionData.session) return { ok: false, error: "Please sign in." };
+
+  const { data: asset, error: assetError } = await supabase
+    .from("media_assets")
+    .select("id,media_file_id,title,status,storage_path")
+    .eq("id", assetId)
+    .single();
+
+  if (assetError || !asset) return { ok: false, error: assetError?.message ?? "Asset not found." };
+  if (asset.status !== "approved") return { ok: false, error: "Approve the asset before publishing." };
+
+  const { error: updateError } = await supabase
+    .from("media_assets")
+    .update({ is_published: true, published_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq("id", assetId);
+
+  if (updateError) return { ok: false, error: updateError.message };
+
+  await supabase.from("content_publications").insert({
+    media_file_id: asset.media_file_id,
+    platform: "godlync",
+    status: "published",
+    published_at: new Date().toISOString(),
+  });
+
+  return { ok: true };
 }
