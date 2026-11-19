@@ -446,3 +446,119 @@ export async function getAudienceInsights() {
     { name: "Comments", value: (comments.count ?? 0).toLocaleString("en-US") },
   ];
 }
+
+export async function getAnalyticsEngagement() {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const user = sessionData.session?.user;
+  if (!user) return null;
+
+  const { data: profiles, error: profileError } = await supabase
+    .from("creator_profiles")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("status", "approved");
+
+  if (profileError) return null;
+
+  const profileIds = (profiles ?? []).map((profile) => profile.id);
+  if (!profileIds.length) {
+    return {
+      data: Array.from({ length: 7 }, (_, index) => ({ name: `Day ${index + 1}`, plays: 0, engagement: 0 })),
+      totals: { plays: 0, favorites: 0, shares: 0, wallPosts: 0, comments: 0, wallLikes: 0 },
+    };
+  }
+
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - 6);
+
+  const [mediaResult, wallResult, eventResult] = await Promise.all([
+    supabase
+      .from("media_files")
+      .select("id")
+      .in("creator_profile_id", profileIds)
+      .or("is_deleted.is.null,is_deleted.eq.false")
+      .range(0, 9999),
+    supabase
+      .from("wall_posts")
+      .select("id")
+      .in("creator_profile_id", profileIds)
+      .range(0, 9999),
+    supabase
+      .from("app_events")
+      .select("event_type,payload,created_at")
+      .gte("created_at", start.toISOString())
+      .order("created_at", { ascending: true })
+      .range(0, 9999),
+  ]);
+
+  const mediaIds = new Set((mediaResult.data ?? []).map((item) => item.id));
+  const wallPostIds = new Set((wallResult.data ?? []).map((item) => item.id));
+
+  const chartData = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+
+    return {
+      name: date.toLocaleDateString("en-US", { weekday: "short" }),
+      key: date.toISOString().slice(0, 10),
+      plays: 0,
+      favorites: 0,
+      shares: 0,
+      engagement: 0,
+    };
+  });
+
+  const totals = { plays: 0, favorites: 0, shares: 0, wallPosts: 0, comments: 0, wallLikes: 0 };
+
+  for (const event of eventResult.data ?? []) {
+    const payload = event.payload as Record<string, unknown> | null;
+    const key = new Date(event.created_at).toISOString().slice(0, 10);
+    const day = chartData.find((item) => item.key === key);
+
+    if (event.event_type === "media_play") {
+      if (payload?.media_id && mediaIds.has(String(payload.media_id))) {
+        totals.plays += 1;
+        if (day) {
+          day.plays += 1;
+          day.engagement += 1;
+        }
+      }
+    } else if (event.event_type === "favorite_add") {
+      if (payload?.media_id && mediaIds.has(String(payload.media_id))) {
+        totals.favorites += 1;
+        if (day) {
+          day.favorites += 1;
+          day.engagement += 1;
+        }
+      }
+    } else if (event.event_type === "media_share") {
+      if (payload?.media_id && mediaIds.has(String(payload.media_id))) {
+        totals.shares += 1;
+        if (day) {
+          day.shares += 1;
+          day.engagement += 1;
+        }
+      }
+    } else if (event.event_type === "wall_post_create") {
+      if (payload?.post_id && wallPostIds.has(String(payload.post_id))) totals.wallPosts += 1;
+    } else if (event.event_type === "wall_post_comment") {
+      if (payload?.post_id && wallPostIds.has(String(payload.post_id))) {
+        totals.comments += 1;
+        if (day) day.engagement += 1;
+      }
+    } else if (event.event_type === "wall_post_like") {
+      if (payload?.post_id && wallPostIds.has(String(payload.post_id))) {
+        totals.wallLikes += 1;
+        if (day) day.engagement += 1;
+      }
+    } else if (event.event_type === "wall_post_share") {
+      if (payload?.post_id && wallPostIds.has(String(payload.post_id))) totals.shares += 1;
+    }
+  }
+
+  return { data: chartData, totals };
+}
